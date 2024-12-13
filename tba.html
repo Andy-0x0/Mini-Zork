@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Text-Based Adventure (CS 340 Fall 2024)</title>
+<script>
+const hub_verbs = [
+    'journey',
+    'region',
+    'inventory',
+    'score',
+    'drop',
+];
+
+const domain_verbs = [
+    // in-domain travel verbs:
+    'go',
+    'north',
+    'south',
+    'east',
+    'west',
+    'up',
+    'down',
+
+    // other in-domain verbs:
+    'look',
+    'take',
+    'use',
+    'open',
+    'close',
+    'tell',
+    'read',
+];
+const delete_me = new Set(['a', 'an', 'the', 'about', 'above', 'across', 'after', 'against', 'among', 'around', 'at', 'before', 'behind', 'below', 'beside', 'between', 'by', 'during', 'for', 'from', 'in', 'inside', 'into', 'near', 'of', 'off', 'on', 'out', 'over', 'through', 'to', 'toward', 'under', 'with', 'aboard', 'along', 'amid', 'as', 'beneath', 'beyond', 'but', 'concerning', 'considering', 'despite', 'except', 'following', 'like', 'minus', 'next', 'onto', 'opposite', 'outside', 'past', 'per', 'plus', 'regarding', 'round', 'save', 'since', 'than', 'till', 'underneath', 'unlike', 'until', 'upon', 'versus', 'via', 'within', 'without']);
+const canonize = [
+    [['take','inventory'], ['inventory']],
+    [['north'], ['go','north']],
+    [['south'], ['go','south']],
+    [['east'], ['go','east']],
+    [['west'], ['go','west']],
+    [['up'], ['go','up']],
+    [['down'], ['go','down']],
+];
+
+var hub_server = null;
+var domain_server = null;
+
+function cleanText(s) {
+    // 1: space and case normalization
+    s = s.trim().toLowerCase().replace(/[^- A-Za-z0-9]/g,'').replace(/  +/g,' ');
+    
+    if (s == '') return false;
+
+    // 2: allow verb abbreviations
+    let w = s.split(' ');
+    const opts = [];
+    for(let verb of hub_verbs) if (verb.startsWith(w[0]) && verb != 'score') opts.push(verb);
+    for(let verb of domain_verbs) if (verb.startsWith(w[0])) opts.push(verb);
+    if (opts.length == 1) w[0] = opts[0];
+
+    // 3: remove filler words
+    w = w.filter(e => !delete_me.has(e))
+
+    // 4: canonical forms
+    for(let [o,n] of canonize)
+        if (o.every((value, index) => value === w[index]))
+            w.splice(0, o.length, ...n);
+
+    return w;
+}
+
+function textEntry() {
+    const txt = document.getElementById('command').value.trim();
+    document.getElementById('command').value = '';
+    if (!txt) return;
+    chatlog('me',txt);
+    
+    if (txt == 'help') {
+        if (window.play)
+            chatlog('UI', 'Type commands and see responses. Some commands to consider:<ul><dl><dt>inventory</dt><dd>show what you are carrying</dd><dt>look</dt><dd>show what is here</dd><dt>go north</dt><dd>move within the domain; can also be shortened as just <code>north</code></dd><dt>journey north</dt><dd>move between domains</dd></dl>Many other phrases might do something of interest. They should start with a verb; the set of verbs the game knows about are:<ul><li>'+domain_verbs.concat(hub_verbs).sort().join('</li><li>')+'</li></ul>')
+        else
+            chatlog('UI', 'Hub server is in setup mode.<ul><li>Enter a URL to register a domain, including the scheme and port but not the path; for example, <code style="white-space:pre">'+location.origin+'</code> would be this hub server.</li><li>Enter "play" to exit setup mode.</ul>')
+        return;
+    }
+
+    let dest, url, body
+    if (!window.play) { // setup mode
+        dest = 'hub';
+        body = txt;
+        url = body.toLowerCase() == 'play' ? '/mode' : '/domain';
+        if (!/^(play|https?:\/\/[^:\/]*:[0-9]+)$/.test(body)) {
+            chatlog('UI','In setup mode, only domain server URLs (with a scheme, hostname, and port but no path) and "play" are accepted as commands.');
+            return
+        }
+    } else if (txt == 'reset') { // special play-mode metacommand
+        if (window.confirm("Really reset the hub server? All users and domains will be discarded.")) {
+            dest = 'hub';
+            body = 'setup';
+            url = '/mode';
+        } else {
+            chatlog('UI','Hub server reset canceled by user.');
+            return;
+        }
+    } else { // play mode
+        const tokens = cleanText(txt);
+        console.debug(JSON.stringify(txt),'parsed to',JSON.stringify(tokens));
+        
+        dest = hub_verbs.includes(tokens[0]) ? 'hub' : domain_server;
+        url = (hub_verbs.includes(tokens[0]) ? '' : domain_server) + '/command';
+        body = {'user':user_id, 'command':tokens};
+        if (dest == 'hub') body.secret = user_secret;
+        body = JSON.stringify(body);
+    }
+
+    fetch(url, {
+        method: 'POST',
+        body: body,
+    }).then(res => res.text()).then(data => {
+        if (data.startsWith('$journey ')) {
+            chatlog(dest, 'You leave the domain going '+data.substr(9))
+            document.getElementById('command').value = data.substr(1)
+            requestAnimationFrame(textEntry)
+        } else {
+            chatlog(dest, data)
+
+            const qstxt = txt.replace(/"'/g, '')
+            if (!document.querySelector('#old-commands option[value="'+qstxt+'"]')) {
+                const opt = document.createElement('option');
+                opt.value = qstxt;
+                document.getElementById('old-commands').append(opt);
+            }
+
+            if (url == '/mode') {
+                fetch('/mode').then(res=>res.text()).then(txt=>{
+                    const inplay = txt == 'play';
+                    if (inplay && !window.play) startPlay();
+                    window.play = inplay;
+                })
+            }
+        }
+    }).catch(error => {
+        chatlog('UI', 'Failed to contact <code>'+url+'</code>:<pre>'+String(error)+'</pre>')
+    })
+}
+
+function chatlog(src, msg) {
+    const row = document.createElement('div');
+    if (src.startsWith('http')) src = /[-:](s?[0-9]+)/.exec(src)?.[1]
+    row.classList.add('entry');
+    row.classList.add(src);
+    document.getElementById('chatlog').append(row);
+    if (src == 'me') {
+        row.append(document.createElement('div')); row.lastElementChild.classList.add('flex');
+        row.append(document.createElement('div')); row.lastElementChild.classList.add('from');
+        row.lastElementChild.append(src);
+        if (src.length > 3) row.lastElementChild.style.fontSize = (350/src.length)+'%'
+        row.append(document.createElement('div')); row.lastElementChild.classList.add('text');
+        row.lastElementChild.append(msg);
+    } else {
+        row.append(document.createElement('div')); row.lastElementChild.classList.add('from');
+        row.lastElementChild.append(src);
+        if (src.length > 3) row.lastElementChild.style.fontSize = (350/src.length)+'%'
+        row.append(document.createElement('div')); row.lastElementChild.classList.add('text');
+        row.lastElementChild.insertAdjacentHTML('beforeend',msg);
+        row.append(document.createElement('div')); row.lastElementChild.classList.add('flex');
+    }
+    document.getElementById('chatlog').append(row);
+    document.getElementById('command').scrollIntoView();
+}
+
+function startPlay() {
+    fetch('/login').then(res => res.json()).then(data => {
+        window.user_id = data.id
+        window.user_secret = data.secret
+        window.domain_server = data.domain.url
+        chatlog('UI', 'Logged in as user #'+user_id)
+        chatlog(domain_server, "Welcome to domain <strong>"+data.domain.name+"</strong><br/>"+data.domain.description);
+    }).catch(error => {
+        chatlog('UI', 'User log-in failed:<pre>'+String(error)+'</pre>')
+    })
+}
+
+function setup() {
+    chatlog('UI', 'Contacting hub server...')
+    fetch('/mode').then(res=>res.text()).then(txt => {
+        if (txt == 'setup') {
+            window.play = false;
+            chatlog('UI', 'Hub server is in setup mode.<br/>Type <code>help</code> for more help.')
+        } else if (txt == 'play') {
+            chatlog('UI', 'Hub server is in play mode.<br/>Type <code>help</code> for more help.');
+            startPlay();
+            window.play = true;
+        } else {
+            chatlog('UI', 'Nonsensical answer: '+JSON.stringify(txt))
+        }
+    }).catch(error => {
+        chatlog('UI', 'Hub server contact failed:<pre>'+String(error)+'</pre>')
+    })
+}
+window.addEventListener('load', setup)
+
+</script>
+<style>
+    html { font-family: sans-serif; }
+    pre,code,input { font-size: 1rem; }
+    code, pre { background: rgba(0,0,0,0.03125); border: thin solid rgba(0,0,0,0.125); }
+    code pre, pre pre, code code, pre code { background: none; border: none; }
+    pre { white-space: pre-wrap; }
+    #chatlog { max-width: 40em; margin: auto; }
+    #chatlog > .entry { display: flex; flex-direction: row; margin: 2ex 0; }
+    #chatlog > .entry > .from { width: 2rem; height: fit-content; padding:0.5ex 1ex; border-radius: 1ex 0 0 1ex; }
+    #chatlog > .entry > .from:after { content: ":"; }
+    #chatlog > .entry > .text { padding:1ex; border-radius: 0 1ex 1ex 1ex; white-space: pre-wrap; }
+    #chatlog > .entry > .flex { flex-grow: 1; width: 1rem; }
+    #chatlog > .entry > *:not(.flex) { background: rgba(127,127,127,0.125); }
+    #chatlog > .entry.me > *:not(.flex) { background: rgba(127,127,255,0.25); }
+    #chatlog > .entry.UI > *:not(.flex) { background: rgba(127,255,127,0.25); }
+    #chatlog > .entry.hub > *:not(.flex) { background: rgba(255,191,127,0.25); }
+    .error { border: solid red; }
+    form { display: flex; flex-direction: row; margin-top: 2rem; }
+    form input[type="text"] { flex-grow: 1; }
+    #wrapper { display: flex; flex-direction: column; }
+</style>
+</head>
+<body>
+<div id="wrapper">
+<div id="chatlog" role="log"></div>
+<form action="javascript:textEntry();"><input type="text" id="command" list="old-commands"><input type="submit" value="Send"></form>
+</div>
+<datalist id="old-commands"></datalist>
+</body>
+</html>
